@@ -1,14 +1,14 @@
 #!/bin/bash
 
 # ============================
-# Elasticsearch config
+# Config
 # ============================
-ES="https://elastic:PASSWORD@elasticsearch.domain.com:9200"
+ES="https://elastic:PASSWORD@w0vmprlevipdata01.cloud.ochk.pl:9200"
 SCROLL="5m"
 SIZE=1000
 OUTPUT_DIR="/mnt/newdisk"
+WINDOW=50   # rolling avg window
 
-# Index list
 INDICES=(
   "index-name-2022"
   "index-name-2023"
@@ -42,11 +42,11 @@ INDICES=(
 )
 
 # ============================
-# Function: format seconds
+# Helpers
 # ============================
 format_time() {
   local T=$1
-  printf '%02dh:%02dm:%02ds\n' $((T/3600)) $((T%3600/60)) $((T%60))
+  printf '%02dh:%02dm:%02ds' $((T/3600)) $((T%3600/60)) $((T%60))
 }
 
 # ============================
@@ -56,13 +56,16 @@ export_index() {
   local INDEX="$1"
   local OUTPUT="$OUTPUT_DIR/$INDEX.json"
 
+  echo ""
   echo "==========================="
   echo "Exporting index: $INDEX"
-  echo "Output file: $OUTPUT"
+  echo "Output: $OUTPUT"
 
   > "$OUTPUT"
 
   START_TIME=$(date +%s)
+  LAST_TIME=$START_TIME
+  times=()
 
   # Get total docs
   total_docs=$(curl -s -k -u elastic:PASSWORD \
@@ -70,15 +73,15 @@ export_index() {
     -X GET "$ES/$INDEX/_count" | jq -r '.count')
 
   if [ -z "$total_docs" ]; then
-    echo "Failed to get document count for $INDEX"
+    echo "Failed to get document count!"
     return 1
   fi
 
   total_batches=$(( (total_docs + SIZE - 1) / SIZE ))
-  echo "Total documents: $total_docs"
-  echo "Total batches: $total_batches"
 
-  # First batch
+  echo "Total docs: $total_docs | Total batches: $total_batches"
+
+  # First request
   HTTP_CODE=$(curl -s -k -u elastic:PASSWORD \
     -H 'Content-Type: application/json' \
     -X POST "$ES/$INDEX/_search?scroll=$SCROLL&size=$SIZE" \
@@ -86,7 +89,7 @@ export_index() {
     -o /tmp/response.json -w "%{http_code}")
 
   if [ "$HTTP_CODE" != "200" ]; then
-    echo "Error fetching first batch (HTTP $HTTP_CODE)"
+    echo "Error (HTTP $HTTP_CODE)"
     cat /tmp/response.json
     return 1
   fi
@@ -95,26 +98,67 @@ export_index() {
   batch_data=$(jq -c '.hits.hits[]._source' /tmp/response.json)
 
   if [ -z "$batch_data" ] || [ "$batch_data" = "null" ]; then
-    echo "No data in first batch!"
+    echo "No data!"
     return 1
   fi
 
   echo "$batch_data" >> "$OUTPUT"
   batch_number=1
 
+  # ============================
   # Loop
+  # ============================
   while true; do
     NOW=$(date +%s)
     ELAPSED=$((NOW - START_TIME))
 
-    avg_time_per_batch=$((ELAPSED / batch_number))
+    # measure batch time
+    if [ "$batch_number" -gt 1 ]; then
+      batch_time=$((NOW - LAST_TIME))
+      times+=($batch_time)
+
+      # rolling window
+      if [ "${#times[@]}" -gt "$WINDOW" ]; then
+        times=("${times[@]:1}")
+      fi
+    fi
+
+    LAST_TIME=$NOW
+
+    # avg time
+    sum=0
+    for t in "${times[@]}"; do
+      sum=$((sum + t))
+    done
+
+    if [ "${#times[@]}" -gt 0 ]; then
+      avg_time_per_batch=$(echo "scale=4; $sum / ${#times[@]}" | bc)
+    else
+      avg_time_per_batch=0
+    fi
+
     remaining_batches=$((total_batches - batch_number))
-    remaining_time=$((avg_time_per_batch * remaining_batches))
+    remaining_time=$(echo "$avg_time_per_batch * $remaining_batches" | bc | awk '{print int($1)}')
+
     ETA_TS=$((NOW + remaining_time))
 
-    echo "Batch $batch_number / $total_batches"
-    echo "Elapsed: $(format_time $ELAPSED) | Remaining: $(format_time $remaining_time) | ETA: $(date -d @$ETA_TS)"
+    percent=$(( batch_number * 100 / total_batches ))
+    docs_processed=$((batch_number * SIZE))
+    speed=$(echo "scale=2; $docs_processed / ($ELAPSED + 1)" | bc)
 
+    # progress bar
+    bar_size=30
+    filled=$((percent * bar_size / 100))
+    empty=$((bar_size - filled))
+
+    bar=$(printf "%${filled}s" | tr ' ' '#')
+    bar="$bar$(printf "%${empty}s" | tr ' ' '-')"
+
+    printf "\r[%s] %3d%% | Batch %d/%d | Speed: %s docs/s | Elapsed: %s | ETA: %s" \
+      "$bar" "$percent" "$batch_number" "$total_batches" "$speed" \
+      "$(format_time $ELAPSED)" "$(date -d @$ETA_TS '+%H:%M:%S')"
+
+    # next batch
     HTTP_CODE=$(curl -s -k -u elastic:PASSWORD \
       -H 'Content-Type: application/json' \
       -X POST "$ES/_search/scroll" \
@@ -122,7 +166,8 @@ export_index() {
       -o /tmp/response.json -w "%{http_code}")
 
     if [ "$HTTP_CODE" != "200" ]; then
-      echo "Error fetching batch $batch_number (HTTP $HTTP_CODE)"
+      echo ""
+      echo "Error at batch $batch_number (HTTP $HTTP_CODE)"
       cat /tmp/response.json
       return 1
     fi
@@ -131,7 +176,6 @@ export_index() {
     scroll_id=$(jq -r '._scroll_id' /tmp/response.json)
 
     if [ -z "$batch_data" ] || [ "$batch_data" = "null" ]; then
-      echo "Scroll finished"
       break
     fi
 
@@ -139,13 +183,13 @@ export_index() {
     batch_number=$((batch_number + 1))
   done
 
+  echo ""
   END_TIME=$(date +%s)
   TOTAL_TIME=$((END_TIME - START_TIME))
 
-  echo "Export finished for $INDEX"
-  echo "Total time: $(format_time $TOTAL_TIME)"
+  echo "Finished $INDEX in $(format_time $TOTAL_TIME)"
 
-  # Cleanup scroll
+  # cleanup
   curl -s -k -u elastic:PASSWORD \
     -X DELETE "$ES/_search/scroll" \
     -H 'Content-Type: application/json' \
@@ -155,10 +199,11 @@ export_index() {
 }
 
 # ============================
-# Main loop
+# Main
 # ============================
 for idx in "${INDICES[@]}"; do
-  export_index "$idx" || { echo "Export failed for $idx"; exit 1; }
+  export_index "$idx" || { echo "FAILED: $idx"; exit 1; }
 done
 
-echo "All exports completed"
+echo ""
+echo "All exports completed successfully"
