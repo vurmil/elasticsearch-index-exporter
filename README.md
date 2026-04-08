@@ -1,16 +1,29 @@
-# Elasticsearch Index Exporter
+# Elasticsearch Index Exporter (v2)
 
 ## 📌 Overview
 
-This script exports data from Elasticsearch indices to local JSON files using the Scroll API.
+This tool exports data from Elasticsearch indices to local JSON files using the Scroll API.
 
 It is designed for:
 
-* Large datasets (millions of documents)
-* Reliable full exports (no data loss)
-* Progress tracking with ETA (estimated time remaining)
+* Very large datasets (millions to tens of millions of documents)
+* Reliable full exports (fail-fast, no silent data loss)
+* Real-time progress tracking with ETA and speed metrics
 
 Each index is exported into a separate `.json` file in **JSON Lines format (NDJSON)**.
+
+---
+
+## 🚀 Features
+
+* ✅ Full export using Elasticsearch Scroll API
+* ✅ Multi-index support
+* ✅ Rolling ETA (stable and accurate over time)
+* ✅ Progress bar (like `rsync`)
+* ✅ Speed calculation (documents per second)
+* ✅ Fail-fast error handling (stops on any error)
+* ✅ Separate output file per index
+* ✅ Automatic scroll cleanup
 
 ---
 
@@ -19,106 +32,13 @@ Each index is exported into a separate `.json` file in **JSON Lines format (NDJS
 * `bash`
 * `curl`
 * `jq`
+* `bc`
 
-Install `jq` if missing:
+Install dependencies (Rocky / RHEL):
 
-```bash
-dnf install jq -y
+```bash id="dep_install"
+dnf install -y curl jq bc
 ```
-
----
-
-## 🚀 Features
-
-* ✅ Full index export using Scroll API
-* ✅ Handles very large indices (tens of millions of documents)
-* ✅ Progress tracking (batch, elapsed time, ETA)
-* ✅ Automatic error handling (script stops on failure)
-* ✅ Separate output file per index
-* ✅ Scroll cleanup after completion
-
----
-
-## 📂 Output Format
-
-Each index is exported to:
-
-```
-/mnt/newdisk/<index_name>.json
-```
-
-Example:
-
-```
-/mnt/newdisk/index-name-2022.json
-```
-
-### Data format: JSON Lines (NDJSON)
-
-Each line in the file is a single document:
-
-```json
-{"@timestamp":"2022-09-10T23:56:47.869Z","message":"...","env":"env_name"}
-{"@timestamp":"2022-09-11T19:33:07.263Z","message":"...","env":"env_name"}
-{"@timestamp":"2022-09-12T23:18:37.910Z","message":"...","env":"env_name"}
-```
-
-👉 This format is:
-
-* easy to process with tools like `jq`, `grep`, `awk`
-* compatible with re-import to Elasticsearch
-
----
-
-## 📊 Example Script Output
-
-During execution, the script prints progress:
-
-```
-===========================
-Exporting index: index-name-2022
-Output file: /mnt/newdisk/index-name-2022.json
-
-Total documents: 68234249
-Total batches: 68235
-```
-
-### Progress updates:
-
-```
-Batch 120 / 68235
-Elapsed: 00h:05m:30s | Remaining: 05h:22m:10s | ETA: Wed Apr 8 18:42:10
-```
-
-Where:
-
-* **Batch** → current progress
-* **Elapsed** → time since export started
-* **Remaining** → estimated time left
-* **ETA** → estimated completion time
-
----
-
-### Completion message:
-
-```
-Scroll finished
-Export finished for index-name-2022
-Total time: 06h:12m:45s
-===========================
-```
-
----
-
-## ❌ Error Handling
-
-If any error occurs (e.g. HTTP error, missing data):
-
-```
-Error fetching batch 120 (HTTP 500)
-```
-
-👉 The script immediately stops to prevent incomplete exports.
 
 ---
 
@@ -126,50 +46,171 @@ Error fetching batch 120 (HTTP 500)
 
 1. Edit configuration inside the script:
 
-```bash
+```bash id="config_example"
 ES="https://user:password@host:9200"
 OUTPUT_DIR="/mnt/newdisk"
 ```
 
 2. Run:
 
-```bash
+```bash id="run_example"
 chmod +x export.sh
 ./export.sh
 ```
 
 ---
 
-## ⚠️ Notes
+## 📂 Output
 
-* Large indices (e.g. 70M+ documents) may take several hours
-* ETA becomes accurate after a few batches
+Each index is exported to:
+
+```id="output_path"
+/mnt/newdisk/<index_name>.json
+```
+
+Example:
+
+```id="output_example"
+/mnt/newdisk/index-name-2022.json
+```
+
+---
+
+## 📄 Output Format
+
+Data is stored as **JSON Lines (NDJSON)**:
+
+```json id="json_example"
+{"@timestamp":"2022-09-10T23:56:47.869Z","message":"...","env":"env_example"}
+{"@timestamp":"2022-09-11T19:33:07.263Z","message":"...","env":"env_example"}
+{"@timestamp":"2022-09-12T23:18:37.910Z","message":"...","env":"env_example"}
+```
+
+✔ One document per line
+✔ Easy to parse (`jq`, `grep`, `awk`)
+✔ Easy to re-import to Elasticsearch
+
+---
+
+## 📊 Runtime Output (Progress)
+
+The script displays a real-time progress line:
+
+```id="progress_example"
+[##########--------------------]  34% | Batch 23000/68235 | Speed: 18234.22 docs/s | Elapsed: 00h:18m:12s | ETA: 19:02:11
+```
+
+### Explanation:
+
+| Field        | Description                     |
+| ------------ | ------------------------------- |
+| Progress bar | Visual completion indicator     |
+| %            | Percentage of processed batches |
+| Batch        | Current batch / total batches   |
+| Speed        | Documents processed per second  |
+| Elapsed      | Time since export started       |
+| ETA          | Estimated completion time       |
+
+---
+
+## ⏱️ ETA Calculation
+
+ETA is based on a **rolling average (last N batches)**:
+
+* More stable than simple average
+* Becomes accurate after initial batches
+* Adapts to changing performance
+
+---
+
+## ❌ Error Handling
+
+If any error occurs (HTTP error, parsing issue, missing data):
+
+```id="error_example"
+Error at batch 120 (HTTP 500)
+```
+
+👉 The script immediately stops to prevent incomplete or corrupted exports.
+
+---
+
+## 📦 Performance Notes
+
+* Large indices (50M+ docs) can take **hours**
+* Disk I/O and network speed affect performance
+* Typical speed: **10k–50k docs/sec** (depends on environment)
+
+---
+
+## ⚠️ Important Notes
+
 * Ensure enough disk space before running
-* Output files can be very large (10–100 GB per index)
+* Output files can reach **10–100+ GB per index**
+* ETA is less accurate during the first few batches
+* Script uses `-k` (insecure SSL) — adjust for production security if needed
 
 ---
 
 ## 💡 Tips
 
-* Use `screen` or `tmux` for long-running exports
-* Monitor disk usage:
+### Run in background session
 
-  ```bash
-  df -h
-  ```
-* Check file growth:
+```bash id="screen_tip"
+screen -S es-export
+```
 
-  ```bash
-  watch -n 5 ls -lh /mnt/newdisk
-  ```
+### Monitor disk usage
+
+```bash id="disk_usage"
+df -h
+```
+
+### Watch file growth
+
+```bash id="watch_files"
+watch -n 5 ls -lh /mnt/newdisk
+```
 
 ---
 
 ## 🔧 Possible Improvements
 
-* Resume export after interruption
-* Parallel index export
-* Compression (gzip)
-* Direct upload to object storage
+* Gzip compression (`.json.gz`)
+* Resume after interruption (checkpoint)
+* Parallel exports (multi-index concurrency)
+* Throttling to reduce Elasticsearch load
+* Direct export to object storage (S3, Swift)
+
+---
+
+## 🧠 Use Cases
+
+* Backup Elasticsearch indices
+* Migration between clusters
+* Offline log analysis
+* Compliance / archiving
+
+---
+
+## 📁 Example Index List
+
+```id="index_list"
+index-name-2022
+index-name-2023
+index-name-2024.*
+index-name-2025.*
+index-name-2026.*
+```
+
+---
+
+## ✅ Summary
+
+This tool provides a **safe, observable, and scalable** way to export large Elasticsearch datasets with:
+
+* Full control
+* Real-time visibility
+* Production-grade reliability
 
 ---
